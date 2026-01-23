@@ -1,0 +1,42 @@
+FROM node:20-alpine AS builder
+
+WORKDIR /app
+
+RUN corepack enable && corepack prepare pnpm@latest --activate
+
+COPY pnpm-workspace.yaml package.json pnpm-lock.yaml ./
+COPY apps/backend/package.json ./apps/backend/
+
+RUN pnpm install --frozen-lockfile
+
+COPY apps/backend ./apps/backend
+COPY tsconfig.base.json ./
+
+RUN cd apps/backend && pnpm prisma generate && pnpm build
+FROM node:20-alpine AS runner
+
+WORKDIR /app
+
+RUN corepack enable && corepack prepare pnpm@latest --activate
+
+RUN echo "node-linker=hoisted" > .npmrc
+
+COPY pnpm-workspace.yaml package.json pnpm-lock.yaml ./
+COPY apps/backend/package.json ./apps/backend/
+
+RUN pnpm install --frozen-lockfile --prod
+
+COPY --from=builder /app/apps/backend/dist ./apps/backend/dist
+COPY --from=builder /app/apps/backend/prisma ./apps/backend/prisma
+RUN npm install -g prisma@6
+RUN cd apps/backend && prisma generate
+
+RUN addgroup --system --gid 1001 nodejs && adduser --system --uid 1001 nestjs
+USER nestjs
+
+WORKDIR /app/apps/backend
+
+EXPOSE 3001
+ENV NODE_ENV=production PORT=3001
+
+CMD ["node", "dist/main.js"]

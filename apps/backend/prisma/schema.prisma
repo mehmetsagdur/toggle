@@ -1,0 +1,140 @@
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
+}
+
+// ============================================================================
+// CORE MODELS — Multi-Tenant Feature Flag System
+// ============================================================================
+
+/// Represents an organization/customer using the system
+model Tenant {
+  id             String   @id @default(cuid())
+  name           String
+  slug           String   @unique
+  
+  // Rate limiting quotas (per-tenant)
+  quotaBurst     Int      @default(100)   // Instant request limit (per second)
+  quotaSustained Int      @default(1000)  // Sustained limit (per minute)
+  
+  createdAt      DateTime @default(now())
+  updatedAt      DateTime @updatedAt
+
+  // Relations
+  features     Feature[]
+  featureFlags FeatureFlag[]
+  auditLogs    AuditLog[]
+
+  @@index([slug])
+}
+
+/// A feature that can be toggled on/off across environments
+model Feature {
+  id          String   @id @default(cuid())
+  tenantId    String
+  key         String   // Unique identifier: "dark_mode", "new_checkout_v2"
+  name        String   // Human-readable: "Dark Mode", "New Checkout Flow"
+  description String?
+  
+  createdAt   DateTime @default(now())
+  updatedAt   DateTime @updatedAt
+
+  // Relations
+  tenant Tenant        @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+  flags  FeatureFlag[]
+
+  // Each tenant can only have one feature with a given key
+  @@unique([tenantId, key])
+  @@index([tenantId])
+}
+
+/// The actual flag configuration for a feature in a specific environment
+model FeatureFlag {
+  id         String      @id @default(cuid())
+  tenantId   String
+  featureId  String
+  env        Environment
+  enabled    Boolean     @default(false)
+  
+  // Evaluation strategy configuration
+  strategyType   StrategyType @default(BOOLEAN)
+  strategyConfig Json?        // Holds percentage value, user targeting rules, etc.
+  
+  // Version tracking for cache invalidation (ETag support)
+  version    Int      @default(1)
+  
+  createdAt  DateTime @default(now())
+  updatedAt  DateTime @updatedAt
+
+  // Relations
+  tenant  Tenant  @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+  feature Feature @relation(fields: [featureId], references: [id], onDelete: Cascade)
+
+  // Each tenant+env+feature combination must be unique
+  @@unique([tenantId, env, featureId])
+  // Composite index for fast lookups by tenant and environment
+  @@index([tenantId, env])
+}
+
+/// Tracks all changes to feature flags for audit compliance
+model AuditLog {
+  id        String   @id @default(cuid())
+  tenantId  String
+  
+  // Actor information
+  actorId   String   // User ID who made the change
+  actorType ActorType
+  
+  // Action details
+  action    AuditAction
+  entityType String  // "Feature", "FeatureFlag", "Tenant"
+  entityId  String
+  
+  // Change tracking
+  beforeState Json?  // State before the change
+  afterState  Json?  // State after the change
+  
+  // Metadata
+  ipAddress String?
+  userAgent String?
+  
+  createdAt DateTime @default(now())
+
+  // Relations
+  tenant Tenant @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+
+  @@index([tenantId, createdAt(sort: Desc)])
+  @@index([entityType, entityId])
+}
+
+// ============================================================================
+// ENUMS
+// ============================================================================
+
+enum Environment {
+  DEV
+  STAGING
+  PROD
+}
+
+enum StrategyType {
+  BOOLEAN         // Simple on/off
+  PERCENTAGE      // Gradual rollout by percentage
+  USER_TARGETING  // Specific user IDs or attributes
+}
+
+enum AuditAction {
+  CREATE
+  UPDATE
+  DELETE
+}
+
+enum ActorType {
+  USER
+  SYSTEM
+  API_KEY
+}
